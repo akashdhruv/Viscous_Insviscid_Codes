@@ -1,0 +1,9 @@
+function [df,Jf]=jaco(A,var,Bt,RHS,xj_d,zj_d,xi_d,zi_d,t_com,Naw,Uinf,Vinf,si_d,sj_d,nu,Na)
+m = sym(zeros(size(var)));
+for k = 1:numel(var)
+    m(k) = sym(sprintf('m%d', k));
+end
+f=panelEQ(A,m,Bt,RHS,xj_d,zj_d,xi_d,zi_d,t_com,Naw,Uinf,Vinf,si_d,sj_d,nu,Na);
+Jf=jacobian(f,m);
+df=subs(Jf,m,var);
+end

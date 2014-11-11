@@ -1,0 +1,485 @@
+%% Viscous-Inviscid Interaction Method
+close all 
+clear all
+% clc
+tic
+% Parameter SETUP
+% Initial Configuration and User Control Variables
+T_atm = 22;                                                                % Atmospheric Temperatrue [C]
+P_atm = 101325;                                                            % Atmospheric Pressure [Pa]  
+
+[Out1,Out2,Out3,Out4,Out5,Out6,Out7]=air_properties(T_atm,P_atm);          % Air Properties
+
+g = 9.81;                                                                  % Gravitational Acceleration [m/s^2]                                               
+rho = Out1;                                                                % Air Density [Kg/m^3]
+NACA = '0012';                                                             % Airfoil Profile Criteria
+P_inf = 0;                                                                 % Pressure [N/m^2]
+c = 1;                                                                     % Chord Length [m]
+mu = Out3;                                                                 % Dynamic Viscosity of Air [N.s/m^2]
+nu = Out4;                                                                 % Kinematic Viscosity of Air    
+Re = 6.6841e+006;                                                                % Reynolds Number [unitless]
+V = (Re*mu)/(rho*c);                                                       % Freestream Velocity [m/s]
+Mach = Out2;                                                               % Speed of Sound [m/s]
+Cp_SH = Out5;                                                              % Specific Heat - Constant Pressure [J/(kg.K)]
+Cv_SH = Out6;                                                              % Specific Heat - Constant Volume 
+TC = Out7;                                                                 % Thermal Conductivity [W/(m.K)]
+Pr = (Cp_SH*mu)/TC;                                                        % Prandtl Number [unitless]
+Ns = 50;                                                                   % # of Panels per Surface
+Nw = 150;                                                                  % # of Panels per Wake
+if rem(Ns,2) ~= 0, Ns = Ns-1; end;                                         % Panel # Check
+Na = 2*Ns;                                                                 % Total Number of Panels
+percent_LE = 20;                                                           % Percentage Leading Edge [%]
+I_angle=rad(35);                                                           % Interpolation Angle [rad]
+percent_del=20;                                                            % Trailing Edge Chord Deflection [%]
+ppa=100;                                                                   %      
+alf_d = 0;
+alf_r = rad(alf_d);
+del_d = 0; 
+del_r = rad(del_d);
+Uinf = V*cos(alf_r);
+Vinf = V*sin(alf_r);
+%SOHCAHTOA
+const = [c, rho, g, mu, nu, Re, V, Ns, ppa, percent_del, I_angle, alf_d, alf_r, del_d, del_r, Mach, Pr, Cp_SH, Cv_SH, P_inf];
+%        1  2    3  4   5   6   7  8   9    10           11       12     13     14     15     16    17  18     19     20 
+
+savefile = 'aero_variables.mat';
+save(savefile,'Uinf','Vinf','nu')
+
+
+[xi,zi,si,xj,zj,sj,n_com,t_com,Nw,Naw,del_BSr,xia,zia,sia,xja,zja,sja] = ste_wing_setup(NACA,c,Na,Nw);
+
+
+xi_d = xi; zi_d = zi; si_d = si; xj_d = xj; zj_d = zj; sj_d = sj;          % Initial Coordinates for the Doublet Singularties 
+xi_s = xi; zi_s = zi; si_s = si; xj_s = xj; zj_s = zj; sj_s = sj;          % Initial Coordinates for the Source Singularties
+
+savefile = 'wing_geom.mat';
+save(savefile, 'xi_d','zi_d','si_d','xj_d','zj_d','sj_d','xi_s','zi_s','si_s','xj_s','zj_s','sj_s','n_com','t_com','Na','Nw','Naw');
+
+
+[x0i] = [0.01*ones(Naw+1,1),0.01*ones(Naw+1,1),0.01*ones(Naw+1,1)];
+% Preallocation of memory
+n = zeros(2,Naw);
+B = zeros(Naw,Naw);                                                        % Matrix for influence coefficient
+C = zeros(Naw,Naw);                                                    % Matrix for influence coefficient
+D = zeros(Naw,Naw);
+RHS = zeros(Naw,1);
+Q1  = zeros(Naw,1); R1 = zeros(Naw-1,1); R2 = zeros(Naw-1,1);
+
+
+% Calculate Doublet and Source Influence Matrices
+    for i = 1:Na
+       for j = 1:Naw
+            if i == j 
+                %B(i,j) = PHICS(1,xi_s(i),zi_s(i),xj_s(j),zj_s(j),xj_s(j+1),zj_s(j+1));
+                C(i,j) = 0.5; 
+            else
+                %B(i,j) = PHICS(1,xi_s(i),zi_s(i),xj_s(j),zj_s(j),xj_s(j+1),zj_s(j+1));
+                C(i,j) = PHICD(1,xi_d(i),zi_d(i),xj_d(j),zj_d(j),xj_d(j+1),zj_d(j+1));
+            end
+       end
+    end
+    
+  for i=1:Naw
+      for j=1:Naw
+          B(i,j) = PHICS(1,xi_s(i),zi_s(i),xj_s(j),zj_s(j),xj_s(j+1),zj_s(j+1));
+      end
+  end
+  
+  for i=1:Naw
+      for j=1:Naw
+          if j==1
+              A(i,j)=(B(i,j))/(-xj_d(j));
+          else
+          A(i,j)=(B(i,j)-B(i,j-1))/(xj_d(j-1)-xj_d(j));
+          end
+          
+      end
+  end
+    
+% Apply Explicit Kutta Condition
+    for i = 1:Nw
+        C(Na+i,1) = 1;
+        C(Na+i,Na) = -1;
+        C(Na+i,Na+i) = 1;
+    end
+    
+ sigma = zeros(Na,1);
+    for i = 1:Naw
+        sigma(i) = ([Uinf Vinf]*n_com(:,i));
+    end
+
+RHS=(-B)*sigma;
+RHS(Na+1:Naw)=0;
+
+% savefile = 'influences.mat';
+% save(savefile,'B','C','sigma');
+% 
+MU_SD  = C\RHS;
+% Vt=zeros(Naw,1);
+% Vn=zeros(Naw,1);
+
+for i = 1:Naw
+    for j=1:Naw
+    [ud,wd]=doublet_2Dc(1,xi_d(i),zi_d(i),xj_d(j),zj_d(j),xj_d(j+1),zj_d(j+1));
+    c1(i,j)=[ud wd]*t_com(:,i);
+
+    [us,ws]=source_2Dc(1,xi_d(i),zi_d(i),xj_d(j),zj_d(j),xj_d(j+1),zj_d(j+1));
+    b(i,j)=[us ws]*t_com(:,i);
+
+    end    
+end
+
+  for i=1:Naw
+      for j=1:Naw
+          if j==1
+           a(i,j)=(b(i,j))/(-xj_d(j));
+          else
+          a(i,j)=(b(i,j)-b(i,j-1))/(xj_d(j-1)-xj_d(j));
+          end
+          
+      end
+  end
+
+v_tang=-([Uinf Vinf]*t_com)'+c1*MU_SD+b*sigma;
+% 
+for i=1:Naw
+    Cp_old(i) = 1 - ((v_tang(i))^2/Uinf^2); %here we have to use Uinf because V_inf_t is the tangent component, we cannot use tangent component   
+end
+% savefile='edgevel.mat';
+% save(savefile,'v_tang');
+% save('constants.mat','A','C','a','c','RHS','Na','nu','Naw','xj_d','Uinf','Vinf','t_com');
+% % 
+% mu=MU_SD;
+% mdef=0.1*ones(Naw,1);
+% theta=0.1*ones(Naw,1);
+% % 
+% var=[mu,mdef,theta];
+% options  = optimset('Display','iter');
+% x=fsolve(@interaction,var,options);
+% % 
+% itermax=1600;
+% iter=0;
+% while(iter<13)
+% 
+% 
+%     for i=1:Naw
+%     sig(i,1)=(mdef(i+1)-mdef(i))/(xj_d(i)-xj_d(i+1));
+%     end
+%        
+%     for i = 1:Naw
+%         Vt=0;
+%         Vn=0;
+%     for j=1:Naw
+%         [ud,wd]=doublet_2Dc(mu(j),xi_d(i),zi_d(i),xj_d(j),zj_d(j),xj_d(j+1),zj_d(j+1));
+%         [us,ws]=source_2Dc(sig(j),xi_d(i),zi_d(i),xj_d(j),zj_d(j),xj_d(j+1),zj_d(j+1));
+%         Vt=Vt-ud-us;
+%         Vn=Vn-wd-ws;
+%     end
+%     Vt=Vt+Uinf;
+%     Vn=Vn+Vinf;
+%     Uei(i,1)=[Vt Vn]*t_com(:,i);
+%     end
+%     
+%     dif = sqrt((xi_d(1)-xj_d(1))^2+(zi_d(1)-zj_d(1))^2);
+%     Uej = ppval(pchip(si_d+dif,Uei),sj_d);
+%     Uej=Uej';
+%     
+%     dstar = mdef./Uej;
+%     Hi = dstar./theta;
+%     Hstari = calc_hstar(Hi,Na);
+% 
+%     Re_THT = (Uej.*theta)/nu;
+%     cf_2 = calc_cf(Hi,Na);
+%     cf_2 = (1./Re_THT).*cf_2;
+% 
+%     dcHS = calc_DCHstar(Hi,Na);
+%     dc_Hstar = (1./Re_THT).*dcHS;
+%     
+%     var=[mu;Uej;theta];
+% 
+%     var=var-(jaco(C,var,Bt,sig,RHS,xj_d,Hi,cf_2,Naw,dc_Hstar,Hstari)\...
+%              panelEQ(C,var,Bt,sig,RHS,xj_d,Hi,cf_2,Naw,dc_Hstar,Hstari));
+%     
+%     mdef=dstar.*var(Naw+1:Naw+Naw+1);
+%     mu=var(1:Naw);
+%     theta=var(2*(Naw+1):2*(Naw+1)+Naw);
+%     
+%     iter=iter+1
+%     if(panelEQ(C,var,Bt,sig,RHS,xj_d,Hi,cf_2,Naw,dc_Hstar,Hstari)<=1e-10)
+%         disp 'Converged'
+%         break
+%     end
+% end
+% 
+% 
+% MU_SD=x(:,1);
+% Mass_Def=x(:,2);
+% v_tang=([Uinf Vinf]*t_com)'+c*MU_SD+b*Mass_Def;
+% % 
+% for i=1:Naw
+%     Cp_new(i) = 1 - ((v_tang(i))^2/Uinf^2); %here we have to use Uinf because V_inf_t is the tangent component, we cannot use tangent component   
+% end
+% sig=var(Naw+1:Naw+Na);
+% Vt=zeros(Naw,1);
+% Vn=zeros(Naw,1);
+% for i = 1:Naw
+%     for j=1:Naw
+%     [ud,wd]=doublet_2Dc(MU_SD(j),xi_d(i),zi_d(i),xj_d(j),zj_d(j),xj_d(j+1),zj_d(j+1));
+%     if j<=Na
+%         [us,ws]=source_2Dc(sig(j),xi_d(i),zi_d(i),xj_d(j),zj_d(j),xj_d(j+1),zj_d(j+1));
+%     else
+%         us=0;
+%         ws=0;
+%     end
+%     Vt(i)=Vt(i)-ud-us;
+%     Vn(i)=Vn(i)-wd-ws;
+%     end
+%     Vt(i)=Vt(i)+Uinf;
+%     Vn(i)=Vn(i)+Vinf;
+%     v_tang(i)=[Vt(i) Vn(i)]*t_com(:,i);
+%     Cp_new(i) = 1 - ((v_tang(i))^2/Uinf^2); %here we have to use Uinf because V_inf_t is the tangent component, we cannot use tangent component    
+% end
+% for i = 1:Na
+%      v_inf_t = [Uinf Vinf]*t_com(:,i);
+%         if i == 1
+%             RR = sqrt((xi_d(2)-xi_d(1))^2+(zi_d(2)-zi_d(1))^2);
+%             v_loc_t_SD = ((MU_SD(2)-MU_SD(1))/RR);
+%         elseif i == Na
+%             RR = sqrt((xi_d(Na)-xi_d(Na-1))^2+(zi_d(Na)-zi_d(Na-1))^2);
+%             v_loc_t_SD = ((MU_SD(Na)-MU_SD(Na-1))/RR);
+%         else
+%             RR = sqrt((xi_d(i+1)-xi_d(i-1))^2+(zi_d(i+1)-zi_d(i-1))^2);
+%             v_loc_t_SD = ((MU_SD(i+1)-MU_SD(i-1))/RR); 
+%         end
+%                 
+%     v_tang = v_loc_t_SD + v_inf_t;
+%     Cp_new(i) = 1 - ((v_tang)^2/Uinf^2); %here we have to use Uinf because V_inf_t is the tangent component, we cannot use tangent component
+% end
+
+figure;
+hold on;
+plot(xi_s(1:end),Cp_old(1:end))%,'--k',xi_s(1:end),Cp_new(1:end))
+set(gca,'YDir','reverse');
+xlim([0 1.5])
+ylabel('C_p');
+xlabel('x');  
+
+vt=v_tang(1:Na);
+
+ for i=1:Na
+    if(vt(i)/vt(1)<0)
+    I=i;
+    break
+    end
+end
+
+V1=vt(I-1);
+x1=xi_d(I-1);
+z1=zi_d(I-1);
+
+V2=vt(I);
+x2=xi_d(I);
+z2=zi_d(I);
+
+xstag=x1-V1*(x2-x1)/(V2-V1);
+zstag=z1-V1*(z2-z1)/(V2-V1);
+
+supper=zeros(Na+2-I,1);
+slower=zeros(I,1);
+
+vupper=zeros(Na+2-I,1);
+vlower=zeros(I,1);
+
+slower(2)=sqrt((xstag-xi_d(I-1))^2+(zstag-zi_d(I-1))^2);
+vlower(2)=vt(I-1);
+
+supper(2)=sqrt((xstag-xi_d(I))^2+(zstag-zi_d(I))^2);
+vupper(2)=-vt(I);
+
+for i=2:length(supper)-1
+    supper(i+1)=supper(i)+sqrt((xj_d(I+i)-xj_d(I+i-1))^2+(zj_d(I+i)-zj_d(I+i-1))^2)/2;
+    vupper(i+1)=-vt(I+i-1);
+end
+
+for i=2:I-1
+    slower(i+1)=slower(i)+sqrt((xj_d(I-i+1)-xj_d(I-i))^2+(zj_d(I-i+1)-zj_d(I-i))^2)/2;
+    vlower(i+1)=vt(I-i);
+end
+
+thetaupper=zeros(size(supper));
+thetalower=zeros(size(slower));
+
+thetaupper(1)=sqrt(0.75*nu/abs((vupper(2)-vupper(1))/(supper(2)-supper(1))));
+thetalower(1)=sqrt(0.75*nu/abs((vlower(2)-vlower(1))/(slower(2)-slower(1))));
+
+for i=2:length(thetaupper)
+    thetaupper(i)=sqrt(0.45*nu/vupper(i)^6*trapz(supper(1:i),vupper(1:i).^5));
+end
+
+for i=2:length(thetalower)
+    thetalower(i)=sqrt(0.45*nu/vlower(i)^6*trapz(slower(1:i),vlower(1:i).^5));
+end
+
+dvedsupper = gradient(vupper,supper);
+dvedslower = gradient(vlower,slower);
+
+lambdau=((rho*thetaupper.^2)/mu).*dvedsupper;
+lambdal=((rho*thetalower.^2)/mu).*dvedslower;
+
+Hupper=zeros(size(lambdau));
+Hlower=zeros(size(lambdal));
+
+for i=1:length(Hupper)
+    if (lambdau(i)>0 && lambdau(i)<0.1)
+        Hupper(i) = 2.61-3.75*lambdau(i)+5.24*lambdau(i)^2;
+    end
+    if (lambdau(i)>-0.1 && lambdau(i)<=0)
+        Hupper(i)= 2.088+(0.0731/(lambdau(i)+0.14));
+    end
+end
+
+for i=1:length(Hlower)
+    if (lambdal(i)>0 && lambdal(i)<0.1)
+        Hlower(i) = 2.61-3.75*lambdal(i)+5.24*lambdal(i)^2;
+    end
+    if (lambdal(i)>-0.1 && lambdal(i)<=0)
+        Hlower(i)= 2.088+(0.0731/(lambdal(i)+0.14));
+    end
+end
+
+Lupper=zeros(size(supper));
+Llower=zeros(size(slower));
+
+for i=1:length(Llower)
+    if (lambdal(i)>0 && lambdal(i)<0.1)
+        Llower(i) = 0.22+1.402*lambdal(i) + (0.018*lambdal(i))/(lambdal(i)+0.107);
+    end
+    if (lambdal(i)>-0.1 && lambdal(i)<=0)
+        Llower(i)= 2.088+(0.0731)/(lambdal(i)+0.14);
+    end
+end
+
+Cfupper=zeros(size(supper));
+Cflower=zeros(size(slower));
+
+for i=1:length(Cfupper)
+    Cfupper(i) = 2*Lupper(i)*(vupper(i)*thetaupper(i)/nu);
+end
+for i=1:length(Cflower)
+    Cflower(i) = 2*Llower(i)*(vlower(i)*thetalower(i)/nu);
+end
+
+ReTheta = zeros(size(vupper));
+ReS = zeros(size(ReTheta));
+mc = zeros(size(ReS)); 
+
+for i=2:length(mc)-1
+    ReTheta(i) = (rho*vupper(i)*thetaupper(i))/mu;
+    ReS(i) = (rho*vupper(i)*supper(i))/mu; 
+    mc(i) = 1.174*(1+(22400/ReS(i)))*ReS(i)^0.46; 
+    if (mc(i)<ReTheta(i))
+        iTrans = i;
+        sTrans = supper(i);       
+        thetaTrans = thetaupper(i)';
+        HTrans = Hupper(i-1);
+        break
+    end
+end
+
+H1Upper = zeros(size(Lupper));
+
+H1Upper(iTrans) = fH1(HTrans);
+Hupper(iTrans) = HTrans;
+thetaupper(iTrans) = thetaTrans;
+
+for i =iTrans:length(supper)-1
+    h = supper(i+1)-supper(i);
+    thetaupper(i+1) = thetaupper(i) + h*RHS1(thetaupper(i),Hupper(i),vupper(i),nu,dvedsupper(i));
+    H1Upper(i+1) = H1Upper(i) + h*RHS2(H1Upper(i),thetaupper(i),Hupper(i),vupper(i),nu,dvedsupper(i));
+    Hupper(i+1) = fH(H1Upper(i+1));
+    Cfupper(i) = cf(thetaupper(i),Hupper(i),vupper(i),nu);
+end
+
+% deltaUpper = zeros(size(supper));
+% deltaLower = zeros(size(slower));
+
+deltaUpper = Hupper.*thetaupper;
+
+ReTheta = zeros(size(vlower));
+ReS = zeros(size(ReTheta));
+mc = zeros(size(ReS)); 
+
+for i=2:length(mc)-1
+    ReTheta(i) = (rho*vlower(i)*thetalower(i))/mu;
+    ReS(i) = (rho*vlower(i)*slower(i))/mu; 
+    mc(i) = 1.174*(1+(22400/ReS(i)))*ReS(i)^0.46; 
+    if (mc(i)<ReTheta(i))
+        iTrans = i;
+        sTrans = slower(i);       
+        thetaTrans = thetalower(i)';
+        HTrans = Hlower(i-1);
+        break
+    end
+end
+
+H1lower = zeros(size(Llower));
+
+H1lower(iTrans) = fH1(HTrans);
+Hlower(iTrans) = HTrans;
+thetalower(iTrans) = thetaTrans;
+
+for i =iTrans:length(slower)-1
+    h = slower(i+1)-slower(i);
+    thetalower(i+1) = thetalower(i) + h*RHS1(thetalower(i),Hlower(i),vlower(i),nu,dvedslower(i));
+    H1lower(i+1) = H1lower(i) + h*RHS2(H1lower(i),thetalower(i),Hlower(i),vlower(i),nu,dvedslower(i));
+    Hlower(i+1) = fH(H1lower(i+1));
+    Cflower(i) = cf(thetalower(i),Hlower(i),vlower(i),nu);
+end
+
+% deltalower = zeros(size(slower));
+% deltaLower = zeros(size(slower));
+
+deltaLower = Hlower.*thetalower;
+figure
+plot(supper,deltaUpper,slower,deltaLower)
+
+figure
+plot(supper,thetaupper,slower,thetalower)
+
+
+xco=xj_d(1:Na/2+1);
+xco=flipud(xco);
+zco=zj_d(1:Na/2+1);
+zco=flipud(zco);
+
+for j=1:Na/2
+    i=Na/2+j;
+    length = sqrt((xj_d(i-1)-xj_d(i))^2+(zj_d(i-1)-zj_d(i))^2);
+    if (xj_d(i)-xj_d(i+1)<=0)
+        beta = acos((zj_d(i-1)-zj_d(i))/length);
+    else
+      beta = pi+acos(-(zj_d(i-1)-zj_d(i))/length);
+    end
+    
+    bxu(j) = (deltaUpper(j)*cos(beta)*15+xj_d(i));
+    byu(j) = (deltaUpper(j)*sin(beta)*15+zj_d(i));
+    
+    length = sqrt((xj_d(j)-xj_d(j+1))^2+(zj_d(j)-zj_d(j+1))^2);
+    if (xj_d(j)-xj_d(j+1)<=0)
+        beta = acos((zj_d(j)-zj_d(j+1))/length);
+    else
+      beta = pi+acos(-(zj_d(j)-zj_d(j+1))/length);
+    end
+    
+    bxl(j) = (deltaLower(j)*cos(beta)*15+xco(j));
+    byl(j) = (deltaLower(j)*sin(beta)*15+zco(j));
+end
+figure
+hold on
+plot(xj_d(1:Na+1),zj_d(1:Na+1),'k')
+plot(bxu(1:end),byu(1:end),'b')
+plot(bxl(1:end),byl(1:end),'b')
+axis equal
+
+
+

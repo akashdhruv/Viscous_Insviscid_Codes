@@ -1,0 +1,379 @@
+%% Viscous-Inviscid Interaction Method
+close all 
+clear all
+clc
+tic
+% Parameter SETUP
+% Initial Configuration and User Control Variables
+T_atm = 22;                                                                % Atmospheric Temperatrue [C]
+P_atm = 101325;                                                            % Atmospheric Pressure [Pa]  
+
+[Out1,Out2,Out3,Out4,Out5,Out6,Out7]=air_properties(T_atm,P_atm);          % Air Properties
+
+g = 9.81;                                                                  % Gravitational Acceleration [m/s^2]                                               
+rho = Out1;                                                                % Air Density [Kg/m^3]
+NACA = '0012';                                                             % Airfoil Profile Criteria
+P_inf = 0;                                                                 % Pressure [N/m^2]
+c = 1;                                                                     % Chord Length [m]
+mu = Out3;                                                                 % Dynamic Viscosity of Air [N.s/m^2]
+nu = Out4;                                                                 % Kinematic Viscosity of Air    
+Re = 2000;                                                                 % Reynolds Number [unitless]
+V = (Re*mu)/(rho*c);                                                       % Freestream Velocity [m/s]
+Mach = Out2;                                                               % Speed of Sound [m/s]
+Cp_SH = Out5;                                                              % Specific Heat - Constant Pressure [J/(kg.K)]
+Cv_SH = Out6;                                                              % Specific Heat - Constant Volume 
+TC = Out7;                                                                 % Thermal Conductivity [W/(m.K)]
+Pr = (Cp_SH*mu)/TC;                                                        % Prandtl Number [unitless]
+Ns = 20;                                                                   % # of Panels per Surface
+Nw = 5;                                                                  % # of Panels per Wake
+if rem(Ns,2) ~= 0, Ns = Ns-1; end;                                         % Panel # Check
+Na = 2*Ns;                                                                 % Total Number of Panels
+percent_LE = 20;                                                           % Percentage Leading Edge [%]
+I_angle=rad(35);                                                           % Interpolation Angle [rad]
+percent_del=20;                                                            % Trailing Edge Chord Deflection [%]
+ppa=100;                                                                   %      
+alf_d = 0;
+alf_r = rad(alf_d);
+del_d = 0; 
+del_r = rad(del_d);
+Uinf = V*cos(alf_r);
+Vinf = V*sin(alf_r);
+%SOHCAHTOA
+const = [c, rho, g, mu, nu, Re, V, Ns, ppa, percent_del, I_angle, alf_d, alf_r, del_d, del_r, Mach, Pr, Cp_SH, Cv_SH, P_inf];
+%        1  2    3  4   5   6   7  8   9    10           11       12     13     14     15     16    17  18     19     20 
+
+savefile = 'aero_variables.mat';
+save(savefile,'Uinf','Vinf','nu')
+
+% System Setup
+%%% Note: All outputs are in reference to both the airfoil and the wake.
+
+% xi, zi = Collocation Points
+% xj, zj = End Points 
+% n_com  = Normal vector for each panel
+% n_tan  = Tangent vector for each panel
+% Nw     = Total Number of Wake Panels
+% Naw    = Total Number of Airfoil and Wake Panels
+% del_BSr= Trailing Edge Bisector Angle [rad]
+
+[xi,zi,si,xj,zj,sj,n_com,t_com,Nw,Naw,del_BSr,xia,zia,sia,xja,zja,sja] = ste_wing_setup(NACA,c,Na,Nw);
+
+%         figure;
+%         plot(xj(1:Na+2),zj(1:Na+2),'-b*',...
+%              xj(1:Na),zj(1:Na),'-r')
+%         axis equal 
+
+%         figure;
+%         plot(xja,zja,'-k')
+%         axis equal
+        
+% Setup Initial Geometries for Sources & Doublets
+
+% Note: This code is the initial validation of the strong interaction 
+% method. For comparision purposes the results are assessed against the 
+% data given within Katz & Plotkin. However, the case presented is for a 
+% symmetric NACA 0012 airfoil; where in the case of the GAMES the basic 
+% configuration is a non-symmetric NACA 4412. Subsequently, when assessing
+% the boundary layer thickness that traverse from the airfoil's trailing 
+% edge into the aft wake, the thickness that is ehected from the upper and
+% lower surfaces are no longer equal. In this case the collocation point of
+% the panel method sources must be modified to be in the center of the sum
+% of the boundary layers, as the potential created by the singularity must
+% be equal in all directions. The adjustment in the collocation point
+% requires two wake geometries to be defined, the doublet wake, which
+% defines the trajectory, and the source wake (which defines the
+% thickness). The location of the singularities are not modified within the
+% airfoil geometry.
+
+xi_d = xi; zi_d = zi; si_d = si; xj_d = xj; zj_d = zj; sj_d = sj;          % Initial Coordinates for the Doublet Singularties 
+xi_s = xi; zi_s = zi; si_s = si; xj_s = xj; zj_s = zj; sj_s = sj;          % Initial Coordinates for the Source Singularties
+
+% Data Storage 
+savefile = 'wing_geom.mat';
+save(savefile, 'xi_d','zi_d','si_d','xj_d','zj_d','sj_d','xi_s','zi_s','si_s','xj_s','zj_s','sj_s','n_com','t_com','Na','Nw','Naw');
+
+
+% Calculate Initial Displacement Thickness
+
+% [x0] = BL_initial_estimate(xia,zia,sia,xja,zja,sja,Na,Nw,const);
+% 
+% x0i(:,1) = ppval(pchip(sja,x0(:,1)),si_d);
+% x0i(:,2) = ppval(pchip(sja,x0(:,2)),si_d);
+% x0i(:,3) = ppval(pchip(sja,x0(:,2)),si_d);
+
+[x0i] = [0.01*ones(Naw+1,1),0.01*ones(Naw+1,1),0.01*ones(Naw+1,1)];
+% Preallocation of memory
+n = zeros(2,Naw);
+B = zeros(Naw,Naw);                                                        % Matrix for influence coefficient
+C = zeros(Naw,Naw);                                                    % Matrix for influence coefficient
+D = zeros(Naw,Naw);
+RHS = zeros(Naw,1);
+Q1  = zeros(Naw,1); R1 = zeros(Naw-1,1); R2 = zeros(Naw-1,1);
+
+
+% Calculate Doublet and Source Influence Matrices
+    for i = 1:Na
+       for j = 1:Naw
+            if i == j 
+                B(i,j) = PHICS(1,xi_s(i),zi_s(i),xj_s(j),zj_s(j),xj_s(j+1),zj_s(j+1));
+                C(i,j) = 0.5; 
+            else
+                B(i,j) = PHICS(1,xi_s(i),zi_s(i),xj_s(j),zj_s(j),xj_s(j+1),zj_s(j+1));
+                C(i,j) = PHICD(1,xi_d(i),zi_d(i),xj_d(j),zj_d(j),xj_d(j+1),zj_d(j+1));
+            end
+       end
+    end
+    
+% Apply Explicit Kutta Condition
+    for i = 1:Nw
+        C(Na+i,1) = 1;
+        C(Na+i,Na) = -1;
+        C(Na+i,Na+i) = 1;
+    end
+ sigma = zeros(Naw,1);
+    for i = 1:Naw
+        sigma(i) = ([Uinf Vinf]*n_com(:,i));
+    end
+RHS=(-B)*sigma;
+savefile = 'influences.mat';
+save(savefile,'B','C','sigma');
+
+
+
+% MU_SD  = C\RHS;
+% Vt=zeros(Naw,1);
+% Vn=zeros(Naw,1);
+% for i = 1:Naw
+%     for j=1:Naw
+%     [ud,wd]=doublet_2Dc(MU_SD(j),xi_d(i),zi_d(i),xj_d(j),zj_d(j),xj_d(j+1),zj_d(j+1));
+%     [us,ws]=source_2Dc(sigma(j),xi_d(i),zi_d(i),xj_d(j),zj_d(j),xj_d(j+1),zj_d(j+1));
+%     Vt(i)=Vt(i)-ud-us;
+%     Vn(i)=Vn(i)-wd-ws;
+%     end
+%     Vt(i)=Vt(i)+Uinf;
+%     Vn(i)=Vn(i)+Vinf;
+%     v_tang(i)=[Vt(i) Vn(i)]*t_com(:,i);
+%     Cp_old(i) = 1 - ((v_tang(i))^2/Uinf^2); %here we have to use Uinf because V_inf_t is the tangent component, we cannot use tangent component    
+% end
+% 
+% 
+% mdef = x0i(:,1);
+% muj  = x0i(:,2);
+% theta= x0i(:,3);
+% 
+% 
+% 
+% %% Calculate Mass Defect Influence Matrix
+%     for i = 1:Naw
+%         for j = 1:Naw
+%         if j == 1
+%             num = B(i,2)-B(i,1);
+%             den = xj_s(1)-xj_s(2);
+%         else
+%             num = B(i,j)-B(i,j-1);
+%             den = xj_s(j-1)-xj_s(j);
+%         end
+%             A(i,j) = num/den;
+%         end
+%     end
+% 
+% 
+% %     Q1 = (A*mdef)+(C*muj)+(B*sigma);
+% 
+% 
+%     Uei = v_tang';
+% 
+% %% Extrapolate to Model Velocity at Panel End Nodes    
+%     dif = sqrt((xi_d(1)-xj_d(1))^2+(zi_d(1)-zj_d(1))^2);
+%     Uej = ppval(pchip(si_d+dif,Uei),sj_d);
+% 
+% 
+% 
+% % Calculate Change in Velocity 
+%     delUEI = calc_delUEI(Uej);
+% 
+% % Calculate Average Velocity     
+%     avgUEI = calc_avgUEI(Uej);
+% 
+% % Calculate Displacement Thickness 
+%     dstar = mdef./Uei;
+% 
+% % Calculate Shape Factor 
+%     Hi = dstar./theta;
+% % 
+% % %% Extrapolate to Model Shape Factor at Panel End Nodes    
+% %     Hj = ppval(pchip(si_d+dif,Hi),sj_d);
+%     
+% % Calculate Average Shape Factor
+%     avgH = calc_avgH(Hi);
+% 
+% % Calculate Kinetic Energy Shape Factor 
+%     Hstari = calc_hstar(Hi,Na);
+% 
+% % Extrapolate Kinetic Shape for End Nodes
+%     Hstarj = ppval(pchip(si_d+dif,Hstari),sj_d);
+% 
+% % Calculate Change in Kinetic Energy Shape Factor
+%     delHS = calc_delHS(Hstarj);
+% 
+% % Calculate Avergae Kinetic Energy Shape Factor
+%     avgHS = calc_avgHS(Hstarj);
+%    
+% %% Calculate Momentum Thickness at Panel Nodes
+%     thetaj = ppval(pchip(si_d+dif,theta),sj_d);
+% 
+% % Calculate Change in Momentum Thickness
+%     delTHT = calc_delTHT(thetaj);
+% 
+% % Calculate Average Momentum Thickness
+%     avgTHT = calc_avgTHT(thetaj);
+% 
+% % Calculate Momentum Thickness Dependent Reynolds Number
+%     Re_THT = (Uei.*theta)/nu;
+% 
+% % Calculate Coefficient of Friction
+%     cf_2 = calc_cf(Hi,Na);
+%     cf_2 = (1./Re_THT).*cf_2;
+%   
+% 
+% % % Calculate Average Coefficient of Friction
+% %     avgCF2 = calc_avgCF2(cf_2);
+% 
+% % Calculate Node Spacing
+%     delX = calc_delX(xj_d);
+% 
+% % Calculate Residual Equation R1
+%     R1 = (delTHT./avgTHT)+((Hi+2).*(delUEI./avgUEI))-(0.5*cf_2.*(delX./avgTHT));
+% 
+% % Calculate Dissipation Coefficient divided by Hstar
+% %     dcHS = calc_DCHstar(Hj);
+% %    
+% %     dc_Hstar = (1./Re_THT').*dcHS;
+% 
+% % Calculate Average Dissipation Coefficient divided by Hstar
+%     avgDCH = calc_avgDCH(Hi,Na);
+%     avgDCH = (1./Re_THT).*avgDCH;
+% %     avgDCH=calc_avgCF2(avgDCH);
+% 
+% % Calculate R2
+%     R2 = (delHS./avgHS)+((1-Hi).*(delUEI./avgUEI))+((0.5*cf_2-avgDCH).*(delX./avgTHT));
+
+
+%
+MU_SD  = C\RHS;
+Vt=zeros(Naw,1);
+Vn=zeros(Naw,1);
+for i = 1:Naw
+    for j=1:Naw
+    [ud,wd]=doublet_2Dc(MU_SD(j),xi_d(i),zi_d(i),xj_d(j),zj_d(j),xj_d(j+1),zj_d(j+1));
+    [us,ws]=source_2Dc(sigma(j),xi_d(i),zi_d(i),xj_d(j),zj_d(j),xj_d(j+1),zj_d(j+1));
+    Vt(i)=Vt(i)-ud-us;
+    Vn(i)=Vn(i)-wd-ws;
+    end
+    Vt(i)=Vt(i)+Uinf;
+    Vn(i)=Vn(i)+Vinf;
+    v_tang(i)=[Vt(i) Vn(i)]*t_com(:,i);
+    Cp_old(i) = 1 - ((v_tang(i))^2/Uinf^2); %here we have to use Uinf because V_inf_t is the tangent component, we cannot use tangent component    
+end
+savefile='edgevel.mat';
+save(savefile,'v_tang');
+
+% %% Interaction Method
+% options  = optimset('Display','iter');
+% [x,fval] = fsolve(@interaction_fun,x0i,options);
+% toc
+% MU_SD  = x(:,2);
+% B(end+1,:)=1;
+% RHS(end+1)=0;
+
+mu=0.01*ones(Naw+1,1);
+mdef=0.01*ones(Naw+1,1);
+theta=linspace(-.01,.01,Naw+1)';
+
+x=[mu,mdef,theta];
+
+options  = optimset('Display','iter');
+x=fsolve(@vi_int,x,options);
+
+% for i = 1:Naw
+%     for j = 1:Naw
+%             num = B(i,j)-B(i,j-1);
+%             den = xj_s(j-1)-xj_s(j);
+%             A(i,j) = num/den;
+%     end
+% end
+%     A(:,1)=A(:,Na);
+
+% 
+% %%
+% 
+% itermax=1600;
+% iter=0;
+% while(iter<3)
+%    
+%     for i=1:Naw
+%     sig(i,1)=(mdef(i+1)-mdef(i))/(xj_s(i)-xj_s(i+1));
+%     end
+%        
+%     for i = 1:Naw
+%         Vt=0;
+%         Vn=0;
+%     for j=1:Naw
+%         [ud,wd]=doublet_2Dc(mu(j),xi_d(i),zi_d(i),xj_d(j),zj_d(j),xj_d(j+1),zj_d(j+1));
+%         [us,ws]=source_2Dc(sig(j),xi_d(i),zi_d(i),xj_d(j),zj_d(j),xj_d(j+1),zj_d(j+1));
+%         Vt=Vt-ud-us;
+%         Vn=Vn-wd-ws;
+%     end
+%     Vt=Vt+Uinf;
+%     Vn=Vn+Vinf;
+%     Uei(i,1)=[Vt Vn]*t_com(:,i);
+%     end
+%     
+%     dif = sqrt((xi_d(1)-xj_d(1))^2+(zi_d(1)-zj_d(1))^2);
+%     Uej = ppval(pchip(si_d+dif,Uei),sj_d);
+%     Uej=Uej';
+%     
+%     figure
+%     plot(xi_d,Uei,xj_d,Uej);
+%     
+%     dstar = mdef./Uej;
+%     Hi = dstar./theta;
+%     Hstari = calc_hstar(Hi,Na);
+% 
+%     Re_THT = (Uej.*theta)/nu;
+%     cf_2 = calc_cf(Hi,Na);
+%     cf_2 = (1./Re_THT).*cf_2;
+% 
+%     dcHS = calc_DCHstar(Hi,Na);
+%     dc_Hstar = (1./Re_THT).*dcHS;
+% 
+% end
+
+mu=x(:,1);
+MU_SD=(mu(1:end-1)+mu(2:end))/2;
+for i = 1:Na
+     v_inf_t = [Uinf Vinf]*t_com(:,i);
+        if i == 1
+            RR = sqrt((xi_d(2)-xi_d(1))^2+(zi_d(2)-zi_d(1))^2);
+            v_loc_t_SD = ((MU_SD(2)-MU_SD(1))/RR);
+        elseif i == Na
+            RR = sqrt((xi_d(Na)-xi_d(Na-1))^2+(zi_d(Na)-zi_d(Na-1))^2);
+            v_loc_t_SD = ((MU_SD(Na)-MU_SD(Na-1))/RR);
+        else
+            RR = sqrt((xi_d(i+1)-xi_d(i-1))^2+(zi_d(i+1)-zi_d(i-1))^2);
+            v_loc_t_SD = ((MU_SD(i+1)-MU_SD(i-1))/RR); 
+        end
+                
+    v_tang = v_loc_t_SD + v_inf_t;
+    Cp_new(i) = 1 - ((v_tang)^2/Uinf^2); %here we have to use Uinf because V_inf_t is the tangent component, we cannot use tangent component
+end
+
+
+% ind = length(xi)/2;
+figure;
+hold on;
+plot(xi_s(1:end),Cp_old(1:end),'--k',xi_s(1:Na),Cp_new(1:Na))
+set(gca,'YDir','reverse');
+xlim([0 1.5])
+ylabel('C_p');
+xlabel('x');  

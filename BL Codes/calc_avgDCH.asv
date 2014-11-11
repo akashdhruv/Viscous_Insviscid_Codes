@@ -1,0 +1,17 @@
+function [avgDCH] = calc_avgDCH(Hj,Na)
+
+in = length(DC_Hstar);
+avgDCH = zeros(in-1,1);
+
+for i = 1:in
+    if i >Na
+        ch(i) = 1.52*(H(i)-1)^2;
+    else
+        if lt(Hi,7.4)
+            cf_2(i) = -0.067+0.01977*(((7.4-Hi(i))^2)/(Hi(i)-1));
+        else 
+            cf_2(i) = -0.067+0.022*(1-(1.4/(Hi(i)-6)))^2;
+        e
+    end
+end
+end
